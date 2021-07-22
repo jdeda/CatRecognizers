@@ -139,36 +139,10 @@ def nn_h_params_init():
         "mini_batch_sz": 19,
         "l_rate": 0.01,
         "l_dims": [12288, 20, 7, 5, 1],
-        "adam": nn_adam_init([12288, 20, 7, 5, 1]),
-        "lambd": 0.02,
+        "lambd": 0.2,
         "p_cost": True
     }
     return h_params
-
-
-def nn_adam_init(l_dims):
-    """
-    Initializes values for adam optimizer.
-    :param l_dims: dimensions of the layers of the model
-    :return: adam gradients
-    """
-
-    L = len(l_dims)
-    adam_grads = {}
-
-    # Initialize vdW, vdB, sdW, sdb for all layers.
-    for l in range(1, L):
-        adam_grads["vdW" + str(l)] = np.zeros((l_dims[l], l_dims[l - 1]))
-        adam_grads["vdb" + str(l)] = np.zeros((l_dims[l], 1))
-        adam_grads["sdW" + str(l)] = np.zeros((l_dims[l], l_dims[l - 1]))
-        adam_grads["sdb" + str(l)] = np.zeros((l_dims[l], 1))
-
-    # Initialize betas and epsilon.
-    adam_grads["beta1"] = 0.9
-    adam_grads["beta2"] = 0.999
-    adam_grads["epsilon"] = 1e-8
-
-    return adam_grads
 
 
 def nn_params_init(l_dims):
@@ -187,6 +161,25 @@ def nn_params_init(l_dims):
         params["b" + str(l)] = np.zeros((l_dims[l], 1))
 
     return params
+
+
+def nn_regularization_lf_init(params, lambd, m):
+    """
+    Computes and returns the LF regularization.
+    :param params: parameters of the model
+    :param lambd: weight shrinkage parameter
+    :param m: number of examples in training set
+    :return: lf regularization value
+    """
+
+    lf = 0
+    L = len(params) // 2
+    for l in range(1, L):
+        lf = lf + np.sum(np.square(params["W" + str(l)]))
+
+
+    lf_reg = (lambd / (2.0 * m)) * lf
+    return lf_reg
 
 
 def relu(Z):
@@ -295,17 +288,18 @@ def nn_loss(AL, Y):
     return loss
 
 
-def nn_cost(AL, Y):
+def nn_cost(AL, Y, lf_reg):
     """
     Computes the cost of the model.
     :param AL: activations of output layer
     :param Y: training set of labels
+    :param lf_reg: lf regularization value
     :return: cost of model
     """
 
     m = Y.shape[1]
     loss = nn_loss(AL, Y)
-    cost = (1.0 / m) * np.sum(loss)
+    cost = (1.0 / m) * np.sum(loss) + lf_reg
     cost = np.squeeze(cost)
     return cost
 
@@ -340,17 +334,19 @@ def sigmoid_backward(dA, cache):
     return dZ
 
 
-def l_backward_linear_activation(dZ, cache):
+def l_backward_linear_activation(dZ, cache, lambd):
     """
     Computes and returns the gradients dA_prev, dW, and db of layer.
     :param dZ: gradient of Z of layer
     :param cache: cache of layer (W, A_prev, b)
+    :param lambd: weight shrinkage parameter
     :return: dA_prev, dW, and db
     """
 
     W, A_prev, b = cache
     m = A_prev.shape[1]
-    dW = (1.0 / m) * np.dot(dZ, A_prev.T)
+    reg_lf_der = (lambd / m) * W
+    dW = ((1.0 / m) * np.dot(dZ, A_prev.T)) + reg_lf_der
     db = (1.0 / m) * np.sum(dZ, axis=1, keepdims=True)
     dA_prev = np.dot(W.T, dZ)
 
@@ -380,27 +376,29 @@ def l_backward_non_linear_activation(dA, cache, a_func):
     return dZ
 
 
-def l_bprop(dA, cache, a_func):
+def l_bprop(dA, cache, a_func, lambd):
     """
     Computes and returns the gradients of the layer.
     :param dA: the activations of layer
     :param cache: cache of layer ((W, A_prev, b), (Z))
     :param a_func: activation function name
+    :param lambd: weight shrinkage parameter
     :return: dA_prev, dW, db
     """
 
     linear_cache, activation_cache = cache
     dZ = l_backward_non_linear_activation(dA, activation_cache, a_func)
-    dA_prev, dW, db = l_backward_linear_activation(dZ, linear_cache)
+    dA_prev, dW, db = l_backward_linear_activation(dZ, linear_cache, lambd)
     return dA_prev, dW, db
 
 
-def nn_bprop(AL, Y, caches):
+def nn_bprop(AL, Y, caches, lambd):
     """
     Computes and returns the gradients of the model's parameters.
     :param AL: activations of the output layer
     :param Y: training set of labels
     :param caches: values used to compute activations of all layers ((Z), (W, A_prev, b))
+    :param lambd: weight shrinkage parameter
     :return: gradients
     """
 
@@ -412,56 +410,31 @@ def nn_bprop(AL, Y, caches):
     # Compute gradients of output layer.
     dAL = - (np.divide(Y, AL) - np.divide(1 - Y, 1 - AL))
     current_cache = caches[L - 1]
-    grads["dA" + str(L - 1)], grads["dW" + str(L)], grads["db" + str(L)] = l_bprop(dAL, current_cache, "sigmoid")
+    grads["dA" + str(L - 1)], grads["dW" + str(L)], grads["db" + str(L)] = l_bprop(dAL, current_cache, "sigmoid", lambd)
 
     # Compute gradients of all previous layers.
     for l in reversed(range(L - 1)):
         current_cache = caches[l]
         grads["dA" + str(l)], grads["dW" + str(l + 1)], grads["db" + str(l + 1)] = l_bprop(grads["dA" + str(l + 1)],
-                                                                                           current_cache, "relu")
+                                                                                           current_cache, "relu", lambd)
 
     return grads
 
 
-def nn_params_update(params, l_rate, grads, a, t):
+def nn_params_update(params, l_rate, grads):
     """
     Updates model's parameters after one step of gradient descent.
     :param params: model's parameters
     :param l_rate: model's learning rate
     :param grads: parameter's  gradients
-    :param a: the adam optimizer
-    :param t: iteration number of gradient descent or adam
     :return: updated parameters
     """
 
-    # Prepare adam constants.
-    a_corrected = {}
-    b1 = a["beta1"]
-    b2 = a["beta2"]
-    e = a["epsilon"]
 
     L = len(params) // 2
     for l in range(1, L + 1):
-
-        # Compute and correct vdW and vdB.
-        a["vdW" + str(l)] = (b1 * a["vdW" + str(l)]) + ((1 - b1) * grads["dW" + str(l)])
-        a["vdb" + str(l)] = (b1 * a["vdb" + str(l)]) + ((1 - b1) * grads["db" + str(l)])
-        a_corrected["vdW" + str(l)] = a["vdW" + str(l)] / (1 - (b1 ** t))
-        a_corrected["vdb" + str(l)] = a["vdb" + str(l)] / (1 - (b1 ** t))
-
-        # Compute and correct sdW and sdB.
-        a["sdW" + str(l)] = (b2 * a["sdW" + str(l)]) + ((1 - b2) * np.square(grads["dW" + str(l)]))
-        a["sdb" + str(l)] = (b2 * a["sdb" + str(l)]) + ((1 - b2) * np.square(grads["db" + str(l)]))
-        a_corrected["sdW" + str(l)] = a["sdW" + str(l)] / (1 - (b2 ** t))
-        a_corrected["sdb" + str(l)] = a["sdb" + str(l)] / (1 - (b2 ** t))
-
-        # Compute values subtracted from parameters.
-        dw_step = l_rate * (a_corrected["vdW" + str(l)]) / (np.sqrt(a_corrected["sdW" + str(l)]) + e)
-        db_step = l_rate * (a_corrected["vdb" + str(l)]) / (np.sqrt(a_corrected["sdb" + str(l)]) + e)
-
-        # Update parameters.
-        params["W" + str(l)] = params["W" + str(l)] - dw_step
-        params["b" + str(l)] = params["b" + str(l)] - db_step
+        params["W" + str(l)] = params["W" + str(l)] - (l_rate * grads["dW" + str(l)])
+        params["b" + str(l)] = params["b" + str(l)] - (l_rate * grads["db" + str(l)])
 
     return params
 
@@ -487,17 +460,21 @@ def nn_train(X, Y, h_params, params):
 
         # Initialize mini batches and perform an epoch.
         mini_batches = dataset_mini_batches(X, Y, h_params["mini_batch_sz"], i + 1)
-        t = 0
         cost_total = 0
 
         for mini_batch in mini_batches:
-            # Update parameters and compute cost.
+
+            # Unpack mini batches X and Y.
             (mini_batch_X, mini_batch_Y) = mini_batch
+
+            # Optimize and update parameters.
             AL, caches = nn_fprop(mini_batch_X, params)
-            cost_total += nn_cost(AL, mini_batch_Y)
-            grads = nn_bprop(AL, mini_batch_Y, caches)
-            t += 1
-            params = nn_params_update(params, h_params["l_rate"], grads, h_params["adam"], t)
+            grads = nn_bprop(AL, mini_batch_Y, caches, h_params["lambd"])
+            params = nn_params_update(params, h_params["l_rate"], grads)
+
+            # Compute and accumulate cost.
+            lf_reg = nn_regularization_lf_init(params, h_params["lambd"], mini_batch_X.shape[1])
+            cost_total += nn_cost(AL, mini_batch_Y, lf_reg)
 
         # Print cost.
         nn_cost_print(i, h_params["n_epochs"], cost_total / X.shape[1])
