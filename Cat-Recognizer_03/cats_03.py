@@ -139,6 +139,7 @@ def nn_h_params_init():
         "mini_batch_sz": 19,
         "l_rate": 0.01,
         "l_dims": [12288, 20, 7, 5, 1],
+        "adam": nn_adam_init([12288, 20, 7, 5, 1]),
         "lambd": 0.2,
         "p_cost": True
     }
@@ -180,6 +181,31 @@ def nn_regularization_lf_init(params, lambd, m):
 
     lf_reg = (lambd / (2.0 * m)) * lf
     return lf_reg
+
+
+def nn_adam_init(l_dims):
+    """
+    Initializes values for adam optimizer.
+    :param l_dims: dimensions of the layers of the model
+    :return: adam gradients
+    """
+
+    L = len(l_dims)
+    a = {}
+
+    # Initialize vdW, vdB, sdW, sdb for all layers.
+    for l in range(1, L):
+        a["vdW" + str(l)] = np.zeros((l_dims[l], l_dims[l - 1]))
+        a["vdb" + str(l)] = np.zeros((l_dims[l], 1))
+        a["sdW" + str(l)] = np.zeros((l_dims[l], l_dims[l - 1]))
+        a["sdb" + str(l)] = np.zeros((l_dims[l], 1))
+
+    # Initialize betas and epsilon.
+    a["beta1"] = 0.9
+    a["beta2"] = 0.999
+    a["epsilon"] = 1e-8
+
+    return a
 
 
 def relu(Z):
@@ -421,23 +447,47 @@ def nn_bprop(AL, Y, caches, lambd):
     return grads
 
 
-def nn_params_update(params, l_rate, grads):
+def nn_params_update(params, l_rate, grads, a, t):
     """
     Updates model's parameters after one step of gradient descent.
     :param params: model's parameters
     :param l_rate: model's learning rate
     :param grads: parameter's  gradients
+    :param a: the adam optimizer
+    :param t: iteration number of gradient descent or adam
     :return: updated parameters
     """
 
+    # Prepare adam constants.
+    a_corrected = {}
+    b1 = a["beta1"]
+    b2 = a["beta2"]
+    e = a["epsilon"]
 
     L = len(params) // 2
     for l in range(1, L + 1):
-        params["W" + str(l)] = params["W" + str(l)] - (l_rate * grads["dW" + str(l)])
-        params["b" + str(l)] = params["b" + str(l)] - (l_rate * grads["db" + str(l)])
+
+        # Compute and correct vdW and vdB.
+        a["vdW" + str(l)] = (b1 * a["vdW" + str(l)]) + ((1 - b1) * grads["dW" + str(l)])
+        a["vdb" + str(l)] = (b1 * a["vdb" + str(l)]) + ((1 - b1) * grads["db" + str(l)])
+        a_corrected["vdW" + str(l)] = a["vdW" + str(l)] / (1 - (b1 ** t))
+        a_corrected["vdb" + str(l)] = a["vdb" + str(l)] / (1 - (b1 ** t))
+
+        # Compute and correct sdW and sdB.
+        a["sdW" + str(l)] = (b2 * a["sdW" + str(l)]) + ((1 - b2) * np.square(grads["dW" + str(l)]))
+        a["sdb" + str(l)] = (b2 * a["sdb" + str(l)]) + ((1 - b2) * np.square(grads["db" + str(l)]))
+        a_corrected["sdW" + str(l)] = a["sdW" + str(l)] / (1 - (b2 ** t))
+        a_corrected["sdb" + str(l)] = a["sdb" + str(l)] / (1 - (b2 ** t))
+
+        # Compute values subtracted from parameters.
+        dw_step = l_rate * (a_corrected["vdW" + str(l)]) / (np.sqrt(a_corrected["sdW" + str(l)]) + e)
+        db_step = l_rate * (a_corrected["vdb" + str(l)]) / (np.sqrt(a_corrected["sdb" + str(l)]) + e)
+
+        # Update parameters.
+        params["W" + str(l)] = params["W" + str(l)] - dw_step
+        params["b" + str(l)] = params["b" + str(l)] - db_step
 
     return params
-
 
 def nn_cost_print(i, n_epoch, cost):
     if i % 100 == 0:
@@ -461,6 +511,7 @@ def nn_train(X, Y, h_params, params):
         # Initialize mini batches and perform an epoch.
         mini_batches = dataset_mini_batches(X, Y, h_params["mini_batch_sz"], i + 1)
         cost_total = 0
+        t = 0
 
         for mini_batch in mini_batches:
 
@@ -470,7 +521,8 @@ def nn_train(X, Y, h_params, params):
             # Optimize and update parameters.
             AL, caches = nn_fprop(mini_batch_X, params)
             grads = nn_bprop(AL, mini_batch_Y, caches, h_params["lambd"])
-            params = nn_params_update(params, h_params["l_rate"], grads)
+            t += 1
+            params = nn_params_update(params, h_params["l_rate"], grads, h_params["adam"], t)
 
             # Compute and accumulate cost.
             lf_reg = nn_regularization_lf_init(params, h_params["lambd"], mini_batch_X.shape[1])
