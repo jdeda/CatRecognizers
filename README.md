@@ -4,7 +4,7 @@
 
 #### Welcome to CatRecognizers
 Here you'll find a trio of machine learning models trained to label an image as true if it contains a cat. 
-These models were inspired by Andrew Ng's Deep Learning Specialization course, which can found on Coursera.
+These models were inspired by Andrew Ng's Deep Learning Specialization course, which can found on [here.](https://www.coursera.org/specializations/deep-learning)
 
 #### CR-1
 ANN built from scratch using NumPy. Basic logistic regression model.
